@@ -5,9 +5,10 @@ from bs4 import BeautifulSoup
 def scrape_website(url):
     response = requests.get(url)
     soup = BeautifulSoup(response.content, 'html.parser')
+    # text_data = [element.get_text().replace('\n', ' \n ') for element in soup.find_all(['body'])]
     text_data = [element.get_text() for element in soup.find_all(['body'])]
-    return " ".join(text_data)
 
+    return " ".join(text_data)
 
 def clean_and_split_data(data):
     split_data = data.split('\n')

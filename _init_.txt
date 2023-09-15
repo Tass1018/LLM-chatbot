@@ -1,0 +1,7 @@
+
+pip install openai
+pip install bs4
+pip install chromadb
+pip install tiktoken
+pip install faiss-gpu
+pip install faiss-cpu
