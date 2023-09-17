@@ -1,155 +1,132 @@
-import chainlit as cl
-import torch
-from transformers import pipeline
-from langchain import HuggingFacePipeline, LLMChain
-from ctransformers import AutoModelForCausalLM, AutoTokenizer
-from langchain.prompts import PromptTemplate
+from langchain.document_loaders import PyPDFLoader, DirectoryLoader
+from langchain import PromptTemplate
+from langchain.embeddings import HuggingFaceEmbeddings
+from langchain.vectorstores import FAISS
+from langchain.llms import CTransformers
 from langchain.chains import RetrievalQA
-
-OPENAI_API_KEY = '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'
-
-
-template = """You are a helpful assistant chatbot on Professor Matthew Caesar's personal website. Use the following pieces of context to answer the question at the end.
-            If you don't know the answer, just say that you don't know, don't try to make up an answer. Use five sentences maximum. Keep the answer as concise as possible.
-            {context}
-            Question: {question}
-            """
+import chainlit as cl
 
 
-# get model and tokenizer from ctransformers
-model = AutoModelForCausalLM.from_pretrained("TheBloke/Llama-2-7b-Chat-GGUF", hf=True)
-tokenizer = AutoTokenizer.from_pretrained(model)
+custom_prompt_template = """Use the following pieces of information to answer the user's question. When user's question include 'he' or 'him' or 'his, it refers to Matthew Caesar.
+If you don't know the answer, just say that you don't know, don't try to make up an answer. Your words should be precise and friendly.
 
-pipe = pipeline("text-generation",
-                model=model,
-                tokenizer= tokenizer,
-                torch_dtype=torch.bfloat16,
-                device_map="auto",
-                max_new_tokens = 512,
-                do_sample=True,
-                top_k=30,
-                num_return_sequences=1,
-                eos_token_id=tokenizer.eos_token_id
-                )
+Context: {context}
+Question: {question}
 
-llm = HuggingFacePipeline(pipeline = pipe, model_kwargs = {'temperature':0})
+Only return the helpful answer below and nothing else.
+Helpful answer:
+"""
 
 
-def split_texts():
-    from langchain.text_splitter import RecursiveCharacterTextSplitter
-    from langchain.document_loaders import WebBaseLoader
+def scrape_website(url):
+    import requests
+    from bs4 import BeautifulSoup
+    response = requests.get(url)
+    soup = BeautifulSoup(response.content, 'html.parser')
+    # text_data = [element.get_text().replace('\n', ' \n ') for element in soup.find_all(['body'])]
+    text_data = [element.get_text() for element in soup.find_all(['body'])]
 
-    loader = WebBaseLoader("https://caesar.web.engr.illinois.edu/")
-    data = loader.load()
+    return " ".join(text_data)
 
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=50, chunk_overlap=10)
-    all_splits = text_splitter.split_documents(data)
-    return all_splits
 
-def vectordb():
-    from langchain.vectorstores import Chroma
-    from langchain.embeddings.openai import OpenAIEmbeddings
-    persist_directory = 'docs/chroma/'
-    embedding = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)
-    # Create the vector store
-    vectordb = Chroma.from_documents(
-        documents=split_texts(),
-        embedding=embedding,
-        persist_directory=persist_directory
+def set_custom_prompt():
+    """
+    Prompt template for QA retrieval for each vectorstore
+    """
+    prompt = PromptTemplate(template=custom_prompt_template,
+                            input_variables=['context', 'question'])
+    return prompt
+
+#Retrieval QA Chain
+def retrieval_qa_chain(llm, prompt, db):
+    qa_chain = RetrievalQA.from_chain_type(llm=llm,
+                                       chain_type='stuff',
+                                       retriever=db.as_retriever(search_kwargs={'k': 2}),
+                                       return_source_documents=True,
+                                       chain_type_kwargs={'prompt': prompt}
+                                       )
+    return qa_chain
+
+#Loading the model
+def load_llm():
+    # Load the locally downloaded model here
+    llm = CTransformers(
+        model = "TheBloke/Llama-2-7B-Chat-GGUF",
+        model_type="llama",
+        max_new_tokens = 512,
+        temperature = 0.5
     )
-    return vectordb
+    return llm
 
+#QA Model Functionß
+def qa_bot():
+    import re
+    embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2",
+                                       model_kwargs={'device': 'cpu'})
 
+    # loader = WebBaseLoader("https://caesar.web.engr.illinois.edu/")
+    # documents = loader.load()
+    # text_splitter = RecursiveCharacterTextSplitter(chunk_size=100, chunk_overlap=40)
+    #docs = text_splitter.split_documents(documents)
 
+    txt = scrape_website("https://caesar.web.engr.illinois.edu/")
 
+    indices = [(m.start(0), m.end(0)) for m in re.finditer(r'Matthew Caesar|Alumni|Students|Teaching', txt)]
 
+    # Create a list to store the sections
+    sections = []
+
+    # Extract the sections based on the indices of the headings
+    for i, (start, end) in enumerate(indices):
+        if i < len(indices) - 1:
+            sec = txt[start:indices[i + 1][0]]
+            while len(sec) >= 512 :
+                part_sec = sec[:512]
+                sections.append(part_sec)
+                sec = sec[512:]
+            sections.append(sec)
+        else:
+            sections.append(txt[start:])
+
+    db = FAISS.from_texts(sections, embeddings)
+
+    llm = load_llm()
+    qa_prompt = set_custom_prompt()
+    qa = retrieval_qa_chain(llm, qa_prompt, db)
+
+    return qa
+
+#output function
+def final_result(query):
+    qa_result = qa_bot()
+    response = qa_result({'query': query})
+    return response
+
+#chainlit code
 @cl.on_chat_start
-def main():
-    # Instantiate the chain for that user session
-    prompt = PromptTemplate(template=template, input_variables=["context", "question"])
+async def start():
+    chain = qa_bot()
+    msg = cl.Message(content="Starting the bot...")
+    await msg.send()
+    msg.content = "Hi, Welcome to Matthew Caesar Page Bot. Ask me questions!"
+    await msg.update()
 
-    # Initialize your llm and vectordb objects
-    llm = HuggingFacePipeline(pipeline=pipe, model_kwargs={'temperature': 0})
-    db = vectordb()
-
-    llm_chain = LLMChain(prompt=prompt, llm=llm, verbose=True, vectordb=db)
-
-    # Store the chain in the user session
-    cl.user_session.set("llm_chain", llm_chain)
-
+    cl.user_session.set("chain", chain)
 
 @cl.on_message
-async def main(message: str):
-    # Retrieve the chain from the user session
-    llm_chain = cl.user_session.get("llm_chain")
+async def main(message):
+    chain = cl.user_session.get("chain")
+    cb = cl.AsyncLangchainCallbackHandler(
+        stream_final_answer=True, answer_prefix_tokens=["FINAL", "ANSWER"]
+    )
+    cb.answer_reached = True
+    res = await chain.acall(message, callbacks=[cb])
+    answer = f"\nSources:" + str(res["source_documents"])
+    # sources = res["source_documents"]
 
-    # Call the chain asynchronously
-    res = await llm_chain.acall(message, callbacks=[cl.AsyncLangchainCallbackHandler()])
+    # if sources:
+    #     answer += f"\nSources:" + str(sources)
+    # else:
+    #     answer += "\nNo sources found"
 
-    # Do any post processing here
-
-    # "res" is a Dict. For this chain, we get the response by reading the "text" key.
-    # This varies from chain to chain, you should check which key to read.
-    await cl.Message(content=res["text"]).send()
-
-# @cl.on_message
-# async def main(message: str):
-#     # Your custom logic goes here...
-#     db = vectordb()
-#
-#     QA_CHAIN_PROMPT = PromptTemplate.from_template(template)  # Run chain
-#     # QA_CHAIN_PROMPT.format(context=db, question=message)
-#
-#
-#     # Initilaize chain
-#     # Set return_source_documents to True to get the source document
-#     # Set chain_type to prompt template defines
-#     qa_chain = RetrievalQA.from_chain_type(
-#         llm,
-#         retriever=db.as_retriever(),
-#         return_source_documents=True,
-#         chain_type_kwargs={"prompt": QA_CHAIN_PROMPT}
-#     )
-#
-#     result = await cl.make_async(qa_chain({"query": message}))()
-#
-#     # Send a response back to the user
-#     await cl.Message(
-#         content=result["result"],
-#     ).send()
-
-
-
-
-# from langchain import PromptTemplate, OpenAI, LLMChain
-# import chainlit as cl
-#
-# template = """Question: {question}
-#
-# Answer: Let's think step by step."""
-#
-#
-# @cl.on_chat_start
-# def main():
-#     # Instantiate the chain for that user session
-#     prompt = PromptTemplate(template=template, input_variables=["question"])
-#     llm_chain = LLMChain(prompt=prompt, llm=OpenAI(temperature=0), verbose=True)
-#
-#     # Store the chain in the user session
-#     cl.user_session.set("llm_chain", llm_chain)
-#
-#
-# @cl.on_message
-# async def main(message: str):
-#     # Retrieve the chain from the user session
-#     llm_chain = cl.user_session.get("llm_chain")  # type: LLMChain
-#
-#     # Call the chain asynchronously
-#     res = await llm_chain.acall(message, callbacks=[cl.AsyncLangchainCallbackHandler()])
-#
-#     # Do any post processing here
-#
-#     # "res" is a Dict. For this chain, we get the response by reading the "text" key.
-#     # This varies from chain to chain, you should check which key to read.
-#     await cl.Message(content=res["text"]).send()
-
+    await cl.Message(content=answer).send()

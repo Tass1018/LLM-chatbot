@@ -8,8 +8,8 @@ import chainlit as cl
 
 DB_FAISS_PATH = 'vectorstore/db_faiss'
 
-custom_prompt_template = """Use the following pieces of information to answer the user's question.
-If you don't know the answer, just say that you don't know, don't try to make up an answer.
+custom_prompt_template = """Use the following pieces of information to answer the user's question. When user's question include 'he' or 'him' or 'his, it refers to Matthew Caesar.
+If you don't know the answer, just say that you don't know, don't try to make up an answer. Your words should be precise and friendly.
 
 Context: {context}
 Question: {question}
@@ -83,7 +83,12 @@ def qa_bot():
     # Extract the sections based on the indices of the headings
     for i, (start, end) in enumerate(indices):
         if i < len(indices) - 1:
-            sections.append(txt[start:indices[i + 1][0]])
+            sec = txt[start:indices[i + 1][0]]
+            while len(sec) >= 512 :
+                part_sec = sec[:512]
+                sections.append(part_sec)
+                sec = sec[512:]
+            sections.append(sec)
         else:
             sections.append(txt[start:])
 
